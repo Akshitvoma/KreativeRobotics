@@ -4,6 +4,10 @@ import dotenv from "dotenv";
 // Load local environment variables when running locally or in development
 dotenv.config();
 
+export const config = {
+  maxDuration: 15,
+};
+
 export default async function handler(req, res) {
   // Set CORS headers
   res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -28,7 +32,7 @@ export default async function handler(req, res) {
       try {
         body = JSON.parse(body);
       } catch {
-        // use as-is if parsing fails
+        // use as-is
       }
     }
 
@@ -38,28 +42,42 @@ export default async function handler(req, res) {
       return res.status(400).json({ message: "Name, email, and message are required." });
     }
 
-    const host = process.env.SMTP_HOST || "smtp.gmail.com";
-    const port = parseInt(process.env.SMTP_PORT || "587", 10);
+    const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
+    const port = parseInt(process.env.SMTP_PORT || "465", 10);
     const user = process.env.SMTP_USER;
     const pass = process.env.SMTP_PASS;
-    const recipient = process.env.RECIPIENT_EMAIL || user;
+    const recipient = (process.env.RECIPIENT_EMAIL || user || "").trim();
 
     if (!user || !pass) {
       console.error("Missing SMTP credentials (SMTP_USER or SMTP_PASS)");
       return res.status(500).json({
-        message: "Email service is not configured. Please set SMTP credentials.",
+        message: "Email service not configured. Missing SMTP_USER or SMTP_PASS on server.",
       });
     }
 
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: {
-        user,
-        pass,
-      },
-    });
+    const cleanUser = user.trim();
+    const cleanPass = pass.replace(/\s+/g, "");
+
+    const isGmail = host.toLowerCase().includes("gmail");
+    const transportConfig = isGmail
+      ? {
+          service: "gmail",
+          auth: {
+            user: cleanUser,
+            pass: cleanPass,
+          },
+        }
+      : {
+          host,
+          port,
+          secure: port === 465,
+          auth: {
+            user: cleanUser,
+            pass: cleanPass,
+          },
+        };
+
+    const transporter = nodemailer.createTransport(transportConfig);
 
     const safeName = String(name).replace(/[<>]/g, "");
     const safeEmail = String(email).replace(/[<>]/g, "");
@@ -135,29 +153,34 @@ export default async function handler(req, res) {
 </html>`;
 
     const mailOptionsAdmin = {
-      from: `"Kreative Robotics Web" <${user}>`,
+      from: `"Kreative Robotics Web" <${cleanUser}>`,
       to: recipient,
-      replyTo: email,
+      replyTo: safeEmail,
       subject: `New Contact Form Inquiry from ${safeName}`,
       html: adminEmailHtml,
     };
 
+    // Send primary email to admin
     await transporter.sendMail(mailOptionsAdmin);
 
-    const mailOptionsUser = {
-      from: `"Kreative Robotics" <${user}>`,
-      to: email,
-      subject: "Thank You for Your Inquiry - Kreative Robotics",
-      html: userReplyEmailHtml,
-    };
+    // Send confirmation to user (safe / non-blocking)
+    try {
+      const mailOptionsUser = {
+        from: `"Kreative Robotics" <${cleanUser}>`,
+        to: safeEmail,
+        subject: "Thank You for Your Inquiry - Kreative Robotics",
+        html: userReplyEmailHtml,
+      };
+      await transporter.sendMail(mailOptionsUser);
+    } catch (userMailErr) {
+      console.warn("Could not send auto-reply to user:", userMailErr.message);
+    }
 
-    await transporter.sendMail(mailOptionsUser);
-
-    return res.status(200).json({ message: "Emails sent successfully!" });
+    return res.status(200).json({ message: "Your message has been sent successfully!" });
   } catch (error) {
     console.error("Error sending email:", error);
     return res.status(500).json({
-      message: "Failed to send emails. Please try again later.",
+      message: `Failed to send email: ${error.message || "Unknown error"}`,
       error: error.message,
     });
   }
